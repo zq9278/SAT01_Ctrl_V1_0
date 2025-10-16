@@ -1,186 +1,315 @@
-#include "Uart_Communicate.h"
-#include "uart_driver.h"
-#include <stdbool.h>
+
+// Created by zq on 2025/7/4.
+//
+#include <ctype.h>
 #include <string.h>
-#include "main.h"
+#include "Uart_Communicate.h"
+#include <stdbool.h>
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "semphr.h"
+#include "stm32g0xx_hal.h"
+#include "uart_driver.h"
+#include "LOG.h"
+// control modules
+#include "apply.h"
+#include "heat.h"
+#include "tim.h"
 
-extern UART_HandleTypeDef huart1;
+// externs from application domain
+extern volatile u8 WorkMode;
+extern volatile u8 WorkModeState;
+extern volatile u8 AirPump1PWM;
+extern volatile u16 PressureSet;
+extern volatile u16 RightTempSet, LeftTempSet;
+extern PID_TypeDef RightHeat, LeftHeat;
 
+//æ¾¶å‹­æ‚Šæ¶“æ’å½›éºãƒ¦æ•¹é’æ‰®æ®‘ç¼æ’´ç€¯æµ£æ’´æšŸé¹?
+void handle_config_data(const uint8_t* data_ptr, uint16_t data_len)
+{
+    // // éï¿ ç™é—€å®å®³
+    // if(data_len < sizeof(ConfigData_t)) {
+    //     LOG("[Wave] DATA_TYPE_CONFIG éç‰ˆåµé—€å®å®³é–¿æ¬’??: %d\n", data_len);
+    //     return;
+    // }
+
+    // ConfigData_t s;
+    // memcpy(&s, data_ptr, sizeof(ConfigData_t));
+
+    // pm_cmd_t cmd = { .id = PM_CMD_SET_FAN_LEVEL };
+    // cmd.u.fan_level = 100-s.fan;
+    // Param_Post(&cmd, pdMS_TO_TICKS(10));
+
+    // pm_cmd_t cmd2 = { .id = PM_CMD_SET_MIST_LEVEL };
+    // cmd.u.mist_level = s.mist;
+    // Param_Post(&cmd2, pdMS_TO_TICKS(10));
+
+}
+//æ¾¶å‹­æ‚Šæ¶“æ’å½›éºãƒ¦æ•¹é’æ‰®æ®‘éç‰ˆåµ
+uint8_t handle_uint8_t_data(const uint8_t *data_ptr, uint16_t data_len)
+{
+    // éï¿ ç™é—€å®å®³
+    if(data_len < sizeof(uint8_t)) {
+        LOG("[Wave] DATA_uint8_t éç‰ˆåµé—€å®å®³é–¿æ¬’??: %d\n", data_len);
+        return 0;
+    }
+    uint8_t s;
+    memcpy(&s, data_ptr, sizeof(uint8_t));
+ return s;
+}
+//æ¾¶å‹­æ‚Šæ¶“æ’å½›éºãƒ¦æ•¹é’æ‰®æ®‘éç‰ˆåµ
+float handle_float_data(const uint8_t *data_ptr, uint16_t data_len)
+{
+    // éï¿ ç™é—€å®å®³
+    if(data_len < sizeof(float)) {
+        LOG("[Wave] DATA_uint8_t éç‰ˆåµé—€å®å®³é–¿æ¬’??: %d\n", data_len);
+        return 0;
+    }
+    float s;
+    memcpy(&s, data_ptr, sizeof(float));
+    return s;
+}
 /**
- * @brief ´ò°ü²¢·¢ËÍÒ»Ö¡Êı¾İ
- * @param port     UART ¶Ë¿Ú£¨·â×°ÁËÊµÀıºÍ»º³å£©
- * @param type     Êı¾İÀàĞÍ (DataType_t)
- * @param frame_id Ö¡ ID (FrameId_t)
- * @param data     Êı¾İÖ¸Õë
+ * @brief  UARTå¸§è°ƒåº¦å‡½æ•°
+ * @param  frame_id  å¸§IDï¼ˆå‚è€ƒ FrameId_t æšä¸¾ï¼‰
+ * @param  data_ptr  æ•°æ®æŒ‡é’ˆ
+ * @param  data_len  æ•°æ®é•¿åº¦
  *
- * ¹¦ÄÜ£º
- *   ¸ù¾İĞ­Òé¸ñÊ½£¬½«ÊäÈëÊı¾İ´ò°ü³ÉÍêÕûÖ¡£º
- *   Header | FrameID | Type | Length | Data | CRC | Tail
+ * @note   æœ¬å‡½æ•°ç”±ä¸Šä½æœºå‘½ä»¤è§¦å‘ï¼Œä¿®æ”¹å…¨å±€æ§åˆ¶å˜é‡æˆ– WorkMode ä½å­—æ®µã€‚
+ *         WorkMode ä½å®šä¹‰ï¼š
+ *           bit0 â†’ å·¦æ°”å‹åŠŸèƒ½å¼€å¯
+ *           bit1 â†’ å³æ°”å‹åŠŸèƒ½å¼€å¯
+ *           bit2 â†’ å·¦åŠ çƒ­åŠŸèƒ½å¼€å¯
+ *           bit3 â†’ å³åŠ çƒ­åŠŸèƒ½å¼€å¯
  */
-void Uart_SendFrame(UartPort_t* port, DataType_t type, uint16_t frame_id, const void* data)
+void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t data_len)
 {
-    uint8_t buf[64];
-    uint8_t* p = buf;
-    uint16_t data_len = 0;
-    switch (type)
+    switch (frame_id)
     {
-    case DATA_TYPE_CONFIG: data_len = sizeof(ConfigData_t);
-        break;
-    case DATA_TYPE_SENSOR_DATA: data_len = sizeof(SensorData_t);
-        break;
-    case DATA_TYPE_TEXT:
-        data_len = strlen((const char*)data);
-        if (data_len > FRAME_MAX_DATA_LEN) data_len = FRAME_MAX_DATA_LEN;
-        break;
-    case DATA_FLOAT: data_len = sizeof(float);
-        break; // Ö§³Ö float ÀàĞÍ
-    default: return; // Î´ÖªÀàĞÍ£¬Ö±½Ó·µ»Ø
-    }
-    // Ö¡Í·
-    *p++ = FRAME_HEADER_1;
-    *p++ = FRAME_HEADER_2;
-    // Frame ID
-    memcpy(p, &frame_id, 2);
-    p += 2;
-    // Êı¾İÀàĞÍ
-    *p++ = (uint8_t)type;
-    // Êı¾İ³¤¶È
-    memcpy(p, &data_len, 2);
-    p += 2;
-    // Êı¾İÄÚÈİ
-    memcpy(p, data, data_len);
-    p += data_len;
-    // CRC Ğ£Ñé£¨´Ó FrameID ¿ªÊ¼£¬µ½ Data ½áÊø£©
-    uint16_t crc = crc16_modbus(buf + 2, 2 + 1 + 2 + data_len);
-    memcpy(p, &crc, 2);
-    p += 2;
-    // Ö¡Î²
-    *p++ = FRAME_TAIL_1;
-    *p++ = FRAME_TAIL_2;
-    // Í¨¹ıµ×²ãÇı¶¯Öğ×Ö½Ú·¢³ö
-    Uart_SendBuffer(port, buf, p - buf);
-}
-/**
- * @brief Öğ×Ö½ÚĞ­Òé½âÎö×´Ì¬»ú
- * @param byte      ĞÂÊÕµ½µÄ×Ö½Ú
- * @param out_frame ½âÎö³É¹¦Ê±Êä³öÍêÕûÖ¡
- * @return true  ÊÕµ½ÍêÕûÇÒ CRC ÕıÈ·µÄÖ¡
- *         false ÉĞÎ´ÊÕÍê»ò CRC ´íÎó
- */
-bool Protocol_ParseByte(uint8_t byte, Frame_t* out_frame)
-{
-    // ×´Ì¬»úµÄ¼¸¸ö½×¶Î
-    static enum
-    {
-        STATE_IDLE, // µÈ´ıÖ¡Í· 0xAA
-        STATE_HEADER2, // µÈ´ıÖ¡Í· 0x55
-        STATE_FIXED, // ½ÓÊÕ FrameID + Type + Len
-        STATE_DATA, // ½ÓÊÕ Data[n]
-        STATE_CRC, // ½ÓÊÕ CRC
-        STATE_TAIL // ½ÓÊÕÖ¡Î²
-    } state = STATE_IDLE;
+        // =========================================================================
+        // â‘  å‹åŠ›è®¾å®šï¼ˆfloat, å•ä½ kPa, èŒƒå›´ 5~39ï¼‰
+        // =========================================================================
+        case F32_PRESSURE_SET_KPA:
+        {
+            float press_kpa = handle_float_data(data_ptr, data_len);
+            if (press_kpa < 5.0f)  press_kpa = 5.0f;
+            if (press_kpa > 39.0f) press_kpa = 39.0f;
+            PressureSet = (u16)(press_kpa * 1000.0f);   // è½¬æ¢ä¸º Pa å­˜å‚¨
+            LOG("[UART] å‹åŠ›è®¾å®š %.2f kPa\r\n", press_kpa);
+            break;
+        }
 
-    static Frame_t frame; // ÁÙÊ±´æ·ÅÕıÔÚ×é×°µÄÖ¡
-    static uint16_t index; // ÀÛ¼Æ×Ö½Ú¼ÆÊı
-    static uint16_t expected_len; // ÆÚÍûµÄÊı¾İ³¤¶È
-    switch (state)
-    {
-    case STATE_IDLE:
-        if (byte == FRAME_HEADER_1)
+        // =========================================================================
+        // â‘¡ å·¦çœ¼æ¸©åº¦è®¾å®šï¼ˆfloat, Â°Cï¼‰
+        // =========================================================================
+        case F32_LEFT_TEMP_SET_C:
         {
-            frame.header[0] = byte;
-            state = STATE_HEADER2;
-        }
-        break;
-    case STATE_HEADER2:
-        if (byte == FRAME_HEADER_2)
-        {
-            frame.header[1] = byte;
-            index = 0;
-            state = STATE_FIXED;
-        }
-        else
-        {
-            state = STATE_IDLE; // Ö¡Í·´íÎó£¬ÖØÖÃ
-        }
-        break;
+            float lt = handle_float_data(data_ptr, data_len);
+            int32_t sp = (int32_t)(lt * 100.0f);
+            LeftTempSet = (u16)sp;
 
-    case STATE_FIXED:
-        // ÊÕ¼¯ FrameID(2) + Type(1) + Len(2)
-        ((uint8_t*)&frame.frame_id)[index++] = byte;
-        if (index == sizeof(frame.frame_id) + sizeof(frame.data_type) + sizeof(frame.data_length))
+            PID_Init(&LeftHeat, 400, 2, 200, 100000, 0, 1999, 0, LeftTempSet);
+            LOG("[UART] å·¦çœ¼æ¸©åº¦è®¾å®š %.2fÂ°C\r\n", lt);
+            break;
+        }
+
+        // =========================================================================
+        // â‘¢ å³çœ¼æ¸©åº¦è®¾å®šï¼ˆfloat, Â°Cï¼‰
+        // =========================================================================
+        case F32_RIGHT_TEMP_SET_C:
         {
-            expected_len = frame.data_length;
-            if (expected_len > FRAME_MAX_DATA_LEN)
+            float rt = handle_float_data(data_ptr, data_len);
+            int32_t sp = (int32_t)(rt * 100.0f);
+            RightTempSet = (u16)sp;
+
+            PID_Init(&RightHeat, 400, 2, 200, 100000, 0, 1999, 0, RightTempSet);
+            LOG("[UART] å³çœ¼æ¸©åº¦è®¾å®š %.2fÂ°C\r\n", rt);
+            break;
+        }
+
+        // =========================================================================
+        // â‘£ å·¦çœ¼å‹åŠ›å¼€å…³ï¼ˆuint8_tï¼‰
+        // =========================================================================
+        case U8_LEFT_PRESSURE_ENABLE:
+        {
+            uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+            if (en)
             {
-                // ³¤¶ÈÒì³££¬¶ªÆú
-                state = STATE_IDLE;
+                WorkMode |= 0x01; // å·¦æ°”å‹ ON
+                HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
+                TIM15->CCR1 = AirPump1PWM;
+                LOG("[UART] å·¦æ°”å‹ å¼€å¯\r\n");
             }
             else
             {
-                index = 0;
-                state = STATE_DATA;
-            }
-        }
-        break;
-    case STATE_DATA:
-        // ÊÕ¼¯Êı¾İ
-        frame.data[index++] = byte;
-        if (index >= expected_len)
-        {
-            index = 0;
-            state = STATE_CRC;
-        }
-        break;
-    case STATE_CRC:
-        // ÊÕ¼¯ CRC Á½×Ö½Ú
-        ((uint8_t*)&frame.checksum)[index++] = byte;
-        if (index == 2)
-        {
-            index = 0;
-            state = STATE_TAIL;
-        }
-        break;
-    case STATE_TAIL:
-        // ÊÕ¼¯Ö¡Î²Á½¸ö×Ö½Ú
-        frame.tail[index++] = byte;
-        if (index == 2)
-        {
-            index = 0;
-            state = STATE_IDLE;
-            // Ğ£Ñé CRC + Ö¡Î²
-            uint16_t crc_calc = crc16_modbus((uint8_t*)&frame.frame_id, 2 + 1 + 2 + frame.data_length);
-            if (crc_calc == frame.checksum &&
-                frame.tail[0] == FRAME_TAIL_1 && frame.tail[1] == FRAME_TAIL_2)
-            {
-                *out_frame = frame; // Êä³öÍêÕûÖ¡
-                return true;
-            }
-        }
-        break;
-    }
-    return false;
-}
+                WorkMode &= ~0x01; // å·¦æ°”å‹ OFF
+                LOG("[UART] å·¦æ°”å‹ å…³é—­\r\n");
 
-/**
- * @brief ¼ÆËã Modbus CRC16
- * @param buf ÊäÈëÊı¾İ
- * @param len Êı¾İ³¤¶È
- * @return 16 Î» CRC
- */
-uint16_t crc16_modbus(const uint8_t* buf, uint16_t len)
-{
-    uint16_t crc = 0xFFFF;
-    for (uint16_t i = 0; i < len; i++)
-    {
-        crc ^= buf[i];
-        for (uint8_t j = 0; j < 8; j++)
-        {
-            if (crc & 0x0001)
-                crc = (crc >> 1) ^ 0xA001;
-            else
-                crc >>= 1;
+                if ((WorkMode & 0x03) == 0)
+                {
+                    WorkModeState = 0;
+                    HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
+                    TIM15->CCR1 = 0;
+                    AirValve1(0);
+                    AirValve2(0);
+                }
+            }
+            break;
         }
+
+        // =========================================================================
+        // â‘¤ å³çœ¼å‹åŠ›å¼€å…³ï¼ˆuint8_tï¼‰
+        // =========================================================================
+        case U8_RIGHT_PRESSURE_ENABLE:
+        {
+            uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+            if (en)
+            {
+                WorkMode |= 0x02; // å³æ°”å‹ ON
+                HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
+                TIM15->CCR1 = AirPump1PWM;
+                LOG("[UART] å³æ°”å‹ å¼€å¯\r\n");
+            }
+            else
+            {
+                WorkMode &= ~0x02;
+                LOG("[UART] å³æ°”å‹ å…³é—­\r\n");
+
+                if ((WorkMode & 0x03) == 0)
+                {
+                    WorkModeState = 0;
+                    HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
+                    TIM15->CCR1 = 0;
+                    AirValve1(0);
+                    AirValve2(0);
+                }
+            }
+            break;
+        }
+
+        // =========================================================================
+        // â‘¥ å·¦çœ¼åŠ çƒ­å¼€å…³ï¼ˆuint8_tï¼‰
+        // =========================================================================
+        case U8_LEFT_TEMP_ENABLE:
+        {
+            uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+            if (en)
+            {
+                WorkMode |= 0x04;   // å·¦åŠ çƒ­ ON
+                HeatPower(2, 1);
+                HeatPWMSet(2, 0);
+                LOG("[UART] å·¦åŠ çƒ­ å¼€å¯\r\n");
+            }
+            else
+            {
+                WorkMode &= ~0x04;  // å·¦åŠ çƒ­ OFF
+                HeatPower(2, 0);
+                LOG("[UART] å·¦åŠ çƒ­ å…³é—­\r\n");
+            }
+            break;
+        }
+
+        // =========================================================================
+        // â‘¦ å³çœ¼åŠ çƒ­å¼€å…³ï¼ˆuint8_tï¼‰
+        // =========================================================================
+        case U8_RIGHT_TEMP_ENABLE:
+        {
+            uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+            if (en)
+            {
+                WorkMode |= 0x08;   // å³åŠ çƒ­ ON
+                HeatPower(1, 1);
+                HeatPWMSet(1, 0);
+                LOG("[UART] å³åŠ çƒ­ å¼€å¯\r\n");
+            }
+            else
+            {
+                WorkMode &= ~0x08;  // å³åŠ çƒ­ OFF
+                HeatPower(1, 0);
+                LOG("[UART] å³åŠ çƒ­ å…³é—­\r\n");
+            }
+            break;
+        }
+
+        // =========================================================================
+        // â‘§ æ°”æ³µåŠŸç‡è®¾å®šï¼ˆuint8_t, 0~255ï¼‰
+        // =========================================================================
+        case U8_PUMP_POWER_VALUE:
+        {
+            uint8_t pwm = handle_uint8_t_data(data_ptr, data_len);
+            AirPump1PWM = pwm;
+
+            if ((WorkMode & 0x03) != 0)
+            {
+                HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
+                TIM15->CCR1 = AirPump1PWM;
+            }
+            LOG("[UART] æ°”æ³µåŠŸç‡è®¾å®š PWM=%u\r\n", pwm);
+            break;
+        }
+
+        // // =========================================================================
+        // // â‘¨ æ°´è·¯æ§åˆ¶å‘½ä»¤ï¼ˆæ‰©å±•ï¼šåŠ æ°´/æ’æ°´/æ°´æ³µå¯åœï¼‰
+        // // =========================================================================
+        // case 0x1010: // U8_WATER_CTRLï¼ˆæ‰©å±•ä¿ç•™ï¼‰
+        // {
+        //     const uint8_t *p = data_ptr;
+        //     if (p[0] + p[1] + p[2] == 1 && (WorkMode & 0xF0) == 0)
+        //     {
+        //         if (p[0] == 1)
+        //         {
+        //             WorkMode |= 0x20; // åŠ æ°´
+        //             LOG("[UART] åŠ æ°´ å¯åŠ¨\r\n");
+        //         }
+        //         else if (p[1] == 1)
+        //         {
+        //             WorkMode |= 0x10; // æ’æ°´
+        //             LOG("[UART] æ’æ°´ å¯åŠ¨\r\n");
+        //         }
+        //         else if (p[2] == 1)
+        //         {
+        //             WaterState = StartWaterPump(); // æ°´æ³µå¯
+        //             LOG("[UART] æ°´æ³µ å¯åŠ¨\r\n");
+        //         }
+        //     }
+        //     else if (p[2] == 0)
+        //     {
+        //         WaterState = 0;
+        //         StopWaterPump(); // åœæ­¢æ°´æ³µ
+        //         LOG("[UART] æ°´æ³µ åœæ­¢\r\n");
+        //     }
+        //     break;
+        // }
+
+        // // =========================================================================
+        // // â‘© å†·å´æ§åˆ¶å‘½ä»¤ï¼ˆæ‰©å±•ï¼‰
+        // // =========================================================================
+        // case 0x1011: // U8_IPL_COLD_ENABLE
+        // {
+        //     uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+        //     if (en == 0x00)
+        //     {
+        //         StopIPLCold();
+        //         LOG("[UART] å†·å´æ¨¡å— åœæ­¢\r\n");
+        //     }
+        //     else
+        //     {
+        //         uint8_t power = (data_len > 3) ? data_ptr[3] : 128;
+        //         StartIPLCold(power);
+        //         LOG("[UART] å†·å´æ¨¡å— å¯åŠ¨, åŠŸç‡=%u\r\n", power);
+        //     }
+        //     break;
+        // }
+
+        // =========================================================================
+        // æ–‡æœ¬å¸§ / æœªçŸ¥å¸§
+        // =========================================================================
+        case FRAME_ID_TEXT:
+            LOG("[UART] æ–‡æœ¬å¸§æ¥æ”¶ len=%d\r\n", data_len);
+            break;
+
+        default:
+            LOG("[UART] æœªçŸ¥ frame_id: 0x%04X len=%d\r\n", frame_id, data_len);
+            break;
     }
-    return crc;
 }

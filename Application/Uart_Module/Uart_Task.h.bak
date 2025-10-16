@@ -1,0 +1,17 @@
+﻿//
+// Created by zq on 25-9-11.
+//
+
+#ifndef UART_TASK_H
+#define UART_TASK_H
+#include "ADC_Current.h"
+#include "stream_buffer.h"
+extern volatile uint8_t ready_flag;       // 0:A区准备好，1:B区准备好
+extern SemaphoreHandle_t adc_sem;             // FreeRTOS信号量
+extern uint32_t adc1_bufA[ADC1_CH_NUM * ADC_BATCH];
+extern uint32_t adc1_bufB[ADC1_CH_NUM * ADC_BATCH];
+extern StreamBufferHandle_t adc_stream_buffer;
+
+#endif //UART_TASK_H
+
+

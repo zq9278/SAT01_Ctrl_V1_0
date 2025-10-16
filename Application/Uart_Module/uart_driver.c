@@ -1,116 +1,357 @@
-#include "uart_driver.h"
+
+#include <ctype.h>
+#include <stdbool.h>
 #include <string.h>
+#include "uart_driver.h"
 #include "Uart_Communicate.h"
-#include "user_uart_hal.h"
+//#include "Uart_Communicate.h"
+extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart3;
+extern UART_HandleTypeDef huart1;
 
-/**
- * @brief 初始化 UART 驱动
- * @param port     UART 抽象端口（包含环形缓冲、回调函数等）
- * @param instance 硬件 UART 句柄（比如 &huart1）
- * @param baudrate 波特率
- */
-void Uart_Init(UartPort_t *port, void *instance, uint32_t baudrate)
+UartPort_t rk3576_uart_port = {
+        .huart = &huart3,
+        .name = "UART3",
+};
+UartPort_t debug_uart_port = {
+        .huart = &huart1,
+        .name = "UART1",
+};
+
+uint8_t uart1_dma_rx_buf[UART_RX_DMA_BUFFER_SIZE];   // UART1 RX buffer
+uint8_t uart3_dma_rx_buf[UART_RX_DMA_BUFFER_SIZE];   // UART3 RX buffer
+void rk3576_uart_port_Init(UartPort_t *port)
 {
-    port->instance   = instance;
-    port->rx_head    = port->rx_tail = 0;   // 接收环形缓冲初始化为空
-    port->tx_head    = port->tx_tail = 0;   // 发送环形缓冲初始化为空
-    port->rx_callback = rx_callback;        // 指定接收完成后的回调函数
+    port->tx_queue=NULL;
+    port->tx_queue = xQueueCreate(UART_TX_QUEUE_LENGTH, sizeof(UartTxMessage_t));
+    configASSERT(port->tx_queue != NULL);
 
-    // 如果需要初始化硬件，可以在这里调用 UART_HAL_Init
-    //UART_HAL_Init(instance, baudrate);
+    port->rx_queue=NULL;
+    port->rx_queue = xQueueCreate(UART_RX_QUEUE_SIZE, sizeof(UartRxMessage_t));
+    configASSERT(port->rx_queue != NULL);
 
-    // 使能接收中断 (RXNE)
-    UART_HAL_EnableRxInterrupt(instance);
+    port->uartTxDoneSem=NULL;
+    port->uartTxDoneSem=xSemaphoreCreateBinary();
+    xSemaphoreGive(port->uartTxDoneSem);  // 閸掓繂?瀣?瀵查弮璺哄讲閸欐垿鈧??
 
-    // 开启 NVIC 中断
-    HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
+
+    port->dma_rx_buf = uart3_dma_rx_buf;
+
+    port->parser=parse_rk3576_uart_port_stream;
+    port->sender = send_rk3576_uart_port_frame;
+
+    port->crc=crc16_modbus;
+
+    if (port->huart->hdmarx != NULL) { 
+        HAL_UARTEx_ReceiveToIdle_DMA(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE);
+        __HAL_UART_ENABLE_IT(port->huart, UART_IT_IDLE); 
+    } else { 
+        HAL_UARTEx_ReceiveToIdle_IT(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE);
+     }
+
+
 }
-
-/**
- * @brief 发送一个字节
- */
-void Uart_SendByte(UartPort_t *port, uint8_t byte)
+uint8_t uart2_dma_rx_buf[UART_RX_DMA_BUFFER_SIZE];   // reserved
+void debug_uart_port_Init(UartPort_t *port)
 {
-    UART_HAL_SendByte(port->instance, byte);
-}
+     // 閸欐垿鈧?渚�妲﹂崚?
+    port->tx_queue = NULL;
+    port->tx_queue = xQueueCreate(LOG_QUEUE_LEN, sizeof(LogMessage_t));
+    configASSERT(port->tx_queue != NULL);
 
-/**
- * @brief 发送一个缓冲区（阻塞方式）
- */
-void Uart_SendBuffer(UartPort_t *port, const uint8_t *buf, uint16_t len)
-{
-    for (uint16_t i = 0; i < len; i++) {
-        UART_HAL_SendByte(port->instance, buf[i]);
+    port->rx_queue=NULL;
+    port->rx_queue = xQueueCreate(UART_RX_QUEUE_SIZE, sizeof(AsciiCmdMessage_t));
+    configASSERT(port->rx_queue != NULL);
+
+
+    port->dma_rx_buf = uart1_dma_rx_buf;
+
+    port->parser=parse_debug_uart_port_stream;
+   
+
+    if (port->huart->hdmarx != NULL) { 
+        HAL_UARTEx_ReceiveToIdle_DMA(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE); 
+        __HAL_UART_ENABLE_IT(port->huart, UART_IT_IDLE); 
+    } else { 
+        HAL_UARTEx_ReceiveToIdle_IT(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE); 
     }
+
+}
+void rk3576_uart_port_RxCallback(UartPort_t *port, uint16_t size)
+{
+    __HAL_UART_CLEAR_IDLEFLAG(port->huart);  // 濞撳懘娅庣粚娲?妫芥稉?閺??閺嶅洤绻?
+
+    UartRxMessage_t msg;
+    memcpy(msg.data, port->dma_rx_buf, size);
+    msg.length = size;
+
+    // 闁插秴鎯? DMA
+    HAL_UARTEx_ReceiveToIdle_DMA(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE);
+
+    // 閸忋儵妲?
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(port->rx_queue, &msg, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-/**
- * @brief 从接收环形缓冲中取一个字节
- * @return true 取到数据 / false 没有数据
- */
-bool Uart_ReadByte(UartPort_t *port, uint8_t *out)
-{
-    if (port->rx_head == port->rx_tail) return false; // 缓冲为空
-    *out = port->rx_buf[port->rx_tail];
-    port->rx_tail = (port->rx_tail + 1) % UART_RX_BUF_SIZE;
-    return true;
-}
 
-/**
- * @brief 中断服务函数收到 1 个字节时调用
- * @param port UART 端口
- * @param byte 收到的字节
- */
-void UART_Driver_OnRxByte(UartPort_t *port, uint8_t byte)
+void debug_uart_port_RxCallback(UartPort_t *port, uint16_t size)
 {
-    // 放入环形缓冲
-    uint16_t next = (port->rx_head + 1) % UART_RX_BUF_SIZE;
-    if (next != port->rx_tail) {
-        port->rx_buf[port->rx_head] = byte;
-        port->rx_head = next;
+    __HAL_UART_CLEAR_IDLEFLAG(port->huart);  // 濞撳懘娅庣粚娲?妫芥稉?閺??閺嶅洤绻?
+
+    UartRxMessage_t msg;
+    memcpy(msg.data, port->dma_rx_buf, size);
+    msg.length = size;
+
+    // 闁插秴鎯? DMA
+    HAL_UARTEx_ReceiveToIdle_DMA(port->huart, port->dma_rx_buf, UART_RX_DMA_BUFFER_SIZE);
+
+    // 閸忋儵妲?
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(port->rx_queue, &msg, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+
+}
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart == rk3576_uart_port.huart) {
+        rk3576_uart_port_RxCallback(&rk3576_uart_port, Size);
     }
-
-    // 立即调用应用层回调函数（逐字节协议解析）
-    if (port->rx_callback) {
-        port->rx_callback(byte);
+    if (huart == debug_uart_port.huart) {
+        debug_uart_port_RxCallback(&debug_uart_port, Size);
     }
+    // 閸??娴犮儳鎴风紒?濞ｈ?插?? uart2_port閵嗕菇art3_port 缁??
 }
 
-// UART1 的全局端口对象
-extern UartPort_t uart1_port;
-
-/**
- * @brief 接收回调函数，每收到一个字节就会调用
- * @param data 收到的单个字节
- *
- * 处理流程：
- * 1. 每个字节进入 Protocol_ParseByte 状态机。
- * 2. 如果状态机判断收到一帧完整数据，就进入 if 分支。
- * 3. 根据帧的类型和 ID 做业务处理，这里是：
- *    - 如果是 float 类型且 ID == FLOAT_TEMPERATURE：
- *        * 提取 float 数值
- *        * 点亮 / 翻转 LED
- *        * 发送一帧固定的温度 36.5f 回出去
- */
-void rx_callback(uint8_t data)
+bool send_rk3576_uart_port_frame(DataType_t type, uint16_t frame_id, const void *data)
 {
-    static Frame_t f;
+    uint16_t data_len;
 
-    // 逐字节解析协议
-    if (Protocol_ParseByte(data, &f)) {
-        // ? 收到完整一帧
-        if (f.data_type == DATA_FLOAT && f.frame_id == FLOAT_TEMPERATURE) {
-            float val;
-            memcpy(&val, f.data, sizeof(float));
+    // 閺嶈?勫祦缁?璇茬�烽幒銊??鍏兼殶閹??闂�鍨?瀹?
+    switch (type) {
+        case DATA_FLOAT:     data_len = sizeof(float); break;
+        case DATA_UINT8_T:   data_len = sizeof(uint8_t); break;
+        case DATA_TYPE_TEXT:
+            data_len = strlen((const char *)data);
+            if (data_len > FRAME_MAX_DATA_LEN) data_len = FRAME_MAX_DATA_LEN;
+            break;
+        default:
+            return false;
+    }
+    if (data_len > FRAME_MAX_DATA_LEN) return false;  // 鐎瑰?婂弿濡?鈧?閺??
+    UartTxMessage_t msg;
+    memset(&msg, 0, sizeof(msg));
+    uint8_t *p = msg.data;
+    // 鐢?褍銇?
+    *p++ = FRAME_HEADER_1;
+    *p++ = FRAME_HEADER_2;
+    // 鐢??ID
+    memcpy(p, &frame_id, sizeof(frame_id));
+    p += sizeof(frame_id);
+    // 閺佺増宓佺猾璇茬�?
+    *p++ = (uint8_t)type;
+    // 閺佺増宓侀梹鍨?瀹?
+    memcpy(p, &data_len, sizeof(data_len));
+    p += sizeof(data_len);
+    // 閺佺増宓侀崘鍛???
+    memcpy(p, data, data_len);
+    p += data_len;
+    // CRC 閺嶏繝鐛欓敍鍫滅矤 frame_id 瀵?鈧?婵?瀣剁礆
+    uint16_t crc = crc16_modbus(msg.data + 2, sizeof(frame_id) + 1 + 2 + data_len);
+    memcpy(p, &crc, 2);
+    p += 2;
+    // 鐢?褍鐔?
+    *p++ = FRAME_TAIL_1;
+    *p++ = FRAME_TAIL_2;
+    // 鐠佸墽鐤嗛幀濠氭毐鎼达箑鑻熼崗銉╂Е
+    msg.length = p - msg.data;
+    return xQueueSend(rk3576_uart_port.tx_queue, &msg, 100) == pdPASS;
+}
+void parse_rk3576_uart_port_stream(const uint8_t *buf, uint16_t len)
+{
+    uint16_t index = 0;
 
-            // 业务处理：点亮 LED（低电平有效，这里用翻转）
-            HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
-            HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_1);
+    while (index + 11 <= len)  // 閺堚偓鐏忓繐鎶氶梹鍨?瀹抽懛鍐茬毌11鐎涙?勫Ν
+    {
+        // 閹垫儳鎶氭径?
+        if (buf[index] == FRAME_HEADER_1 && buf[index + 1] == FRAME_HEADER_2)
+        {
+            const uint8_t *p = buf + index + 2;
 
-            // 回发一帧固定的温度数据 36.5f
-            float temp = 36.5f;
-            Uart_SendFrame(&uart1_port, DATA_FLOAT, FLOAT_TEMPERATURE, &temp);
+            // 鐟欙絾鐎介崶鍝勭暰鐎涙????
+            uint16_t frame_id;
+            memcpy(&frame_id, p, 2); p += 2;
+
+            uint8_t data_type = *p++;
+
+            uint16_t data_len;
+            memcpy(&data_len, p, 2); p += 2;
+
+            // 濡?鈧?閺屻儵鏆辨惔锔芥Ц閸氾箑鎮庡▔?
+            if (data_len > FRAME_MAX_DATA_LEN || index + 11 + data_len > len) {
+                // 閺佺増宓佹稉宥??鐕傜礉鐠哄啿鍤?缁涘?婄窡閺囨潙?姘?鏆熼幑?
+                break;
+            }
+
+            const uint8_t *data_ptr = p;
+            p += data_len;
+
+            uint16_t crc_recv;
+            memcpy(&crc_recv, p, 2); p += 2;
+
+            // 閺嶏繝鐛欑敮褍鐔?
+            if (p[0] != FRAME_TAIL_1 || p[1] != FRAME_TAIL_2) {
+                index++;  // 娑撳秵妲搁張澶嬫櫏鐢?褝绱濋崥鎴濇倵閸嬪繒些1鐎涙?勫Ν缂佈呯敾閹??
+                continue;
+            }
+
+            // CRC 閺嶏繝鐛?
+            uint16_t crc_calc = rk3576_uart_port.crc(buf + index + 2, 2 + 1 + 2 + data_len);
+            if (crc_recv != crc_calc) {
+                LOG("CRC mismatch, frame skipped\r\n");
+                index += (2 + 2 + 1 + 2 + data_len + 2 + 2);  // 鐠哄疇绻冮弫缈犻嚋鐢??
+                continue;
+            }
+            // 閸︺劍鐗庢?犲本鍨氶崝鐔锋倵鐠嬪啰鏁?
+            UartFrame_Dispatch(frame_id, data_ptr, data_len);
+
+            index += (2 + 2 + 1 + 2 + data_len + 2 + 2);  // 缁夎?插З閸掗?佺瑓娑撯偓鐢?褑鎹ｆ慨?
+        }
+        else {
+            index++;  // 濞屸剝澹橀崚鏉挎姎婢惰揪绱濈紒褏鐢婚崥鎴濇倵閺??
         }
     }
 }
+void parse_debug_uart_port_stream(const uint8_t *buf, uint16_t len)
+{
+    uint16_t index = 0;
+
+    while (index + 11 <= len)  // 閺堚偓鐏忓繐鎶氶梹鍨?瀹抽懛鍐茬毌11鐎涙?勫Ν
+    {
+        // 閹垫儳鎶氭径?
+        if (buf[index] == FRAME_HEADER_1 && buf[index + 1] == FRAME_HEADER_2)
+        {
+            const uint8_t *p = buf + index + 2;
+
+            // 鐟欙絾鐎介崶鍝勭暰鐎涙????
+            uint16_t frame_id;
+            memcpy(&frame_id, p, 2); p += 2;
+
+            uint8_t data_type = *p++;
+
+            uint16_t data_len;
+            memcpy(&data_len, p, 2); p += 2;
+
+            // 濡?鈧?閺屻儵鏆辨惔锔芥Ц閸氾箑鎮庡▔?
+            if (data_len > FRAME_MAX_DATA_LEN || index + 11 + data_len > len) {
+                // 閺佺増宓佹稉宥??鐕傜礉鐠哄啿鍤?缁涘?婄窡閺囨潙?姘?鏆熼幑?
+                break;
+            }
+
+            const uint8_t *data_ptr = p;
+            p += data_len;
+
+            uint16_t crc_recv;
+            memcpy(&crc_recv, p, 2); p += 2;
+
+            // 閺嶏繝鐛欑敮褍鐔?
+            if (p[0] != FRAME_TAIL_1 || p[1] != FRAME_TAIL_2) {
+                index++;  // 娑撳秵妲搁張澶嬫櫏鐢?褝绱濋崥鎴濇倵閸嬪繒些1鐎涙?勫Ν缂佈呯敾閹??
+                continue;
+            }
+
+            // CRC 閺嶏繝鐛?
+            uint16_t crc_calc = rk3576_uart_port.crc(buf + index + 2, 2 + 1 + 2 + data_len);
+            if (crc_recv != crc_calc) {
+                LOG("CRC mismatch, frame skipped\r\n");
+                index += (2 + 2 + 1 + 2 + data_len + 2 + 2);  // 鐠哄疇绻冮弫缈犻嚋鐢??
+                continue;
+            }
+            // 閸︺劍鐗庢?犲本鍨氶崝鐔锋倵鐠嬪啰鏁?
+            UartFrame_Dispatch(frame_id, data_ptr, data_len);
+
+            index += (2 + 2 + 1 + 2 + data_len + 2 + 2);  // 缁夎?插З閸掗?佺瑓娑撯偓鐢?褑鎹ｆ慨?
+        }
+        else {
+            index++;  // 濞屸剝澹橀崚鏉挎姎婢惰揪绱濈紒褏鐢婚崥鎴濇倵閺??
+        }
+    }
+}
+
+uint16_t crc16_modbus(const uint8_t *buf, uint16_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (uint16_t i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x0001)
+                crc = (crc >> 1) ^ 0xA001;
+            else
+                crc >>= 1;
+        }
+    }
+    return crc;
+}
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        uint32_t error = HAL_UART_GetError(huart);
+
+        if (error & HAL_UART_ERROR_ORE) // 濠с垹鍤?闁挎瑨??
+        {
+            //LOG_ISR("UART 濠с垹鍤?闁挎瑨?鐥媙");
+            __HAL_UART_CLEAR_OREFLAG(huart); // 濞撳懘娅庡┃銏犲毉閺嶅洤绻?
+            // 濞撳懐鈹栭幒銉︽暪缂傛挸鍟块崠鐚寸礉闂冨弶?銏??濠氭敚
+            while (__HAL_UART_GET_FLAG(huart, UART_FLAG_RXNE))
+            {
+                volatile uint8_t dummy = (uint8_t)(huart->Instance->RDR & 0xFF);
+                (void)dummy; // 闂冨弶?銏㈢椽鐠囨垵娅掔拃锕�鎲?
+            }
+        }
+
+        if (error & HAL_UART_ERROR_FE) // 鐢?褔鏁婄拠?
+        {
+            //LOG_ISR("UART 鐢?褔鏁婄拠鐥媙");
+            __HAL_UART_CLEAR_FEFLAG(huart); // 濞撳懘娅庣敮褔鏁婄拠?閺嶅洤绻?
+        }
+
+        if (error & HAL_UART_ERROR_NE) // 閸??婢逛即鏁婄拠?
+        {
+            //LOG_ISR("UART 閸??婢逛即鏁婄拠鐥媙");
+            __HAL_UART_CLEAR_NEFLAG(huart); // 濞撳懘娅庨崳?婢逛即鏁婄拠?閺嶅洤绻?
+        }
+
+        if (error & HAL_UART_ERROR_DMA) // DMA闁挎瑨??
+        {
+            //LOG_ISR("UART DMA 闁挎瑨?鐥媙");
+            if (huart->hdmarx != NULL)
+            {
+                HAL_DMA_Abort(huart->hdmarx); // 閸嬫粍??DMA
+            }
+        }
+
+        // 闁插秵鏌婇崥?閸斺�昅A閹恒儲鏁归敍鍫滅箽鐠囦焦甯撮崣锝呭讲閻??閿??
+        if ( HAL_UARTEx_ReceiveToIdle_DMA(&huart1, uart1_dma_rx_buf, UART_RX_DMA_BUFFER_SIZE) == HAL_OK)
+        {
+            //LOG_ISR("UART2 DMA閹恒儲鏁归柌宥呮儙閹存劕濮沑n");
+        }
+        else
+        {
+            //LOG_ISR("UART2 DMA閹恒儲鏁归柌宥呮儙婢惰精瑙?\n");
+        }
+    }
+}
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (huart == rk3576_uart_port.huart)
+        xSemaphoreGiveFromISR(rk3576_uart_port.uartTxDoneSem, &xHigherPriorityTaskWoken);
+    // else if (huart == wuhua_uart_port.huart)
+    //     xSemaphoreGiveFromISR(wuhua_uart_port.uartTxDoneSem, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+
+
+

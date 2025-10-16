@@ -15,59 +15,7 @@
 
 int32_t p, i, d;
 
-// Î¢·ÖÂË²¨ÏµÊı£¨0 < alpha < 1£©£¬Ô½´óÔ½Æ½»¬
 #define DERIVATIVE_FILTER_ALPHA 0.8f
-
-//void PID_Init(PID_TypeDef *pid, float Kp, float Ki, float Kd,
-//              float integral_max, float integral_min,
-//              float output_max, float output_min, float setpoint) {
-//    pid->Kp = Kp;
-//    pid->Ki = Ki;
-//    pid->Kd = Kd;
-//    pid->previous_measured_value = 0.0f;   // ÓÃÓÚÎ¢·ÖÏÈĞĞ
-//    pid->integral = 0.0f;
-//    pid->derivative_filtered = 0.0f;       // Î¢·ÖÂË²¨³õÖµ
-//    pid->integral_max = integral_max;
-//    pid->integral_min = integral_min;
-//    pid->output_max = output_max;
-//    pid->output_min = output_min;
-//    pid->setpoint = setpoint;
-//}
-							
-
-
-//float PID_Compute(PID_TypeDef *pid, float measured_value) {
-//    // ¼ÆËãÎó²î
-//    float error = pid->setpoint - measured_value;
-
-//    // »ı·ÖÏî¼ÆËã²¢ÏŞ·ù
-//    pid->integral += error;
-//    pid->integral = Limit(pid->integral, pid->integral_min, pid->integral_max);
-
-//    // ? Î¢·ÖÏî£¨»ùÓÚ²âÁ¿Öµ£¬·ÇÎó²î£©
-//    float derivative = measured_value - pid->previous_measured_value;
-
-//    // ? Î¢·ÖÂË²¨´¦Àí£º´øµÍÍ¨ÂË²¨µÄÎ¢·ÖÏî
-//    pid->derivative_filtered = DERIVATIVE_FILTER_ALPHA * pid->derivative_filtered +
-//                               (1.0f - DERIVATIVE_FILTER_ALPHA) * derivative;
-
-//    // ±£´æµ±Ç°²âÁ¿ÖµÓÃÓÚÏÂ´ÎÎ¢·Ö¼ÆËã
-//    pid->previous_measured_value = measured_value;
-
-//    // PID ¸÷Ïî¼ÆËã
-//    p = pid->Kp * error;
-//    i = pid->Ki * pid->integral;
-//    d = -pid->Kd * pid->derivative_filtered;  // ×¢Òâ·ûºÅ£ºÎ¢·ÖÏîÓÃÓÚÒÖÖÆ²âÁ¿ÖµÍ»±ä
-
-//    // Êä³ö¼ÆËãÓëÏŞ·ù
-//    float output = p + i + d;
-//    float output_limited = Limit(output, pid->output_min, pid->output_max);
-
-//    // µ÷ÊÔÊä³ö
-//    printf("%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",p,i,d,measured_value,output_limited,pid->setpoint);
-
-//    return output_limited;
-//}
 
 
 void PID_Init(PID_TypeDef *pid, int32_t Kp, int32_t Ki, int32_t Kd,
@@ -94,30 +42,30 @@ int32_t PID_Compute(PID_TypeDef *pid, int32_t measured_value)
 {
     int32_t error = pid->setpoint - measured_value;
 
-    // »ı·Ö¼ÆËã¼°ÏŞ·ù
+    // ï¿½ï¿½ï¿½Ö¼ï¿½ï¿½ã¼°ï¿½Ş·ï¿½
     pid->integral += error;
     if (pid->integral > pid->integral_max) pid->integral = pid->integral_max;
     else if (pid->integral < pid->integral_min) pid->integral = pid->integral_min;
 
-    // Î¢·Ö£¨»ùÓÚ²âÁ¿Öµ±ä»¯£©+ µÍÍ¨ÂË²¨
+    // Î¢ï¿½Ö£ï¿½ï¿½ï¿½ï¿½Ú²ï¿½ï¿½ï¿½Öµï¿½ä»¯ï¿½ï¿½+ ï¿½ï¿½Í¨ï¿½Ë²ï¿½
     int32_t derivative = measured_value - pid->previous_measured_value;
 //    pid->derivative_filtered = (DERIVATIVE_FILTER_ALPHA_NUM * pid->derivative_filtered +
 //                                (DERIVATIVE_FILTER_ALPHA_DEN - DERIVATIVE_FILTER_ALPHA_NUM) * derivative)
 //                               / DERIVATIVE_FILTER_ALPHA_DEN;
     pid->previous_measured_value = measured_value;
 
-    // PID ¸÷Ïî¼ÆËã£¨ÒòÏµÊı·Å´ó1000±¶£¬ĞèÒªËõ»ØÈ¥£©
+    // PID ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ã£¨ï¿½ï¿½Ïµï¿½ï¿½ï¿½Å´ï¿½1000ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½È¥ï¿½ï¿½
     p = (pid->Kp * error) / 1000;
     i = (pid->Ki * pid->integral) / 1000;
     d = -(pid->Kd) / 1000;//-(pid->Kd * pid->derivative_filtered) / 1000;
 
     int32_t output = p + i + d;
 
-    // Êä³öÏŞ·ù
+    // ï¿½ï¿½ï¿½ï¿½Ş·ï¿½
     if (output > pid->output_max) output = pid->output_max;
     else if (output < pid->output_min) output = pid->output_min;
 
-    // µ÷ÊÔÊä³ö£¨¿ÉÑ¡£©
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½
 //    printf("P:%d I:%d D:%d M:%d OUT:%d SP:%d\n", p, i, d, measured_value, output, pid->setpoint);
 
     return output;

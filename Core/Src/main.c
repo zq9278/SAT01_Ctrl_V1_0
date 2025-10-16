@@ -20,6 +20,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "adc.h"
+#include "dma.h"
 #include "i2c.h"
 #include "spi.h"
 #include "tim.h"
@@ -55,8 +56,8 @@ PID_TypeDef RightHeat,LeftHeat;
 /* USER CODE BEGIN PV */
 
 
-extern volatile uint8_t uart_rx_byte;
-extern volatile uint8_t uart_rx_buffer[UART_RX_BUF_SIZE];
+// extern volatile uint8_t uart_rx_byte;
+// extern volatile uint8_t uart_rx_buffer[UART_RX_BUF_SIZE];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -100,6 +101,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
@@ -119,7 +121,7 @@ int main(void)
 	ADS1248_Init();
 	
 	
-	HAL_UART_Receive_IT(&huart3, (uint8_t *)&uart_rx_byte, 1);  // ��ʼ���յ�1�ֽ�
+	// HAL_UART_Receive_IT(&huart3, (uint8_t *)&uart_rx_byte, 1);  // ��ʼ���յ�1�ֽ�
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */
@@ -191,7 +193,7 @@ void SystemClock_Config(void)
 
 /**
   * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM1 interrupt took place, inside
+  * @note   This function is called  when TIM6 interrupt took place, inside
   * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
   * a global variable "uwTick" used as application time base.
   * @param  htim : TIM handle
@@ -202,7 +204,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
 
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1)
+  if (htim->Instance == TIM6)
   {
     HAL_IncTick();
   }

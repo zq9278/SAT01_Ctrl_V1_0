@@ -7,9 +7,9 @@
 #define AirValve1(n)  (n?HAL_GPIO_WritePin(AirValve1_GPIO_Port,AirValve1_Pin,GPIO_PIN_SET):HAL_GPIO_WritePin(AirValve1_GPIO_Port,AirValve1_Pin,GPIO_PIN_RESET)) 
 #define AirValve2(n)  (n?HAL_GPIO_WritePin(AirValve2_GPIO_Port,AirValve2_Pin,GPIO_PIN_SET):HAL_GPIO_WritePin(AirValve2_GPIO_Port,AirValve2_Pin,GPIO_PIN_RESET)) 
 
-#define OD 2	//”“—€
-#define OS 1	//◊Û—€
-#define OU 3	//À´—€
+#define OD 2	//Âè≥Áúº
+#define OS 1	//Â∑¶Áúº
+#define OU 3	//ÂèåÁúº
 
 
 uint16_t ModbusCRC16(const uint8_t *data, uint16_t len) ;

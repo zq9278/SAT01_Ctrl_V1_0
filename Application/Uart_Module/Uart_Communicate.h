@@ -4,125 +4,71 @@
 
 #ifndef ELECTRICAL_MUSCLE_QUBEMX_UART_COMMUNICATE_H
 #define ELECTRICAL_MUSCLE_QUBEMX_UART_COMMUNICATE_H
-#include "stm32f0xx_hal.h"
-#include "uart_driver.h"
+// typedef enum {
+//     // uint8_t 类型
+//     U8_LEFT_PRESSURE_ENABLE   = 0x1001,  // 左眼压力开关 0/1
+//     U8_RIGHT_PRESSURE_ENABLE  = 0x1002,  // 右眼压力开关 0/1
+//     U8_PUMP_VALUE             = 0x1003,  // 气泵数值 0-255
 
-#define UART_TX_QUEUE_LENGTH 8
-#define UART_TX_MSG_MAX_LEN  50
-#define UART_RX_DMA_BUFFER_SIZE 100
-#define UART_RX_QUEUE_SIZE 10
+//     // float 类型
+//     F32_PRESSURE_SET_KPA      = 0x1004,  // 压力设定值 5k-39kPa
+//     F32_LEFT_TEMP_SET_C       = 0x1005,  // 左眼温度设定
+//     F32_RIGHT_TEMP_SET_C      = 0x1006,  // 右眼温度设定
 
-#define FRAME_HEADER_1 0xAA
-#define FRAME_HEADER_2 0x55
-#define FRAME_TAIL_1   0x0D
-#define FRAME_TAIL_2   0x0A
-#define FRAME_MAX_DATA_LEN 32
-#define ASCII_CMD_MAX_LEN 128
+//     // 文本/调试（可选）
+//     FRAME_ID_TEXT             = 0x1020,
+// } FrameId_t;
+/**
+ * ID 规划规则：
+ *   0x1000 ~ 0x10FF : 上位机 → 下位机 控制命令
+ *   0x1100 ~ 0x11FF : 下位机 → 上位机 实时反馈
+ */
 
-
-typedef enum {
-    CMD_UNKNOWN = 0,
-    CMD_SET,
-    CMD_GET,
-    CMD_RESET
-} CommandType_t;
-typedef struct __attribute__((packed)){
-    char line[ASCII_CMD_MAX_LEN];  // �洢����һ�� ASCII ����
-} AsciiCmdMessage_t;
-typedef struct __attribute__((packed)){
-    char cmd[8];         // "set", "get", "reset"
-    char device[16];     // "dac1" ~ "dac4"
-    char param[16];      // "freq", "amp", "type"
-    float value;         // ֧�ָ������
-    char *raw_line;  // ? ����ԭʼָ����
-} AsciiCommand_t;
-
-// ����������
-bool parse_ascii_command(const char *line, AsciiCommand_t *out_cmd);
-
-// �û����øú�����ִ�н������߼�
-void handle_ascii_command(const AsciiCommand_t *cmd);
-
-typedef struct __attribute__((packed)){
-    uint8_t data[UART_RX_DMA_BUFFER_SIZE];
-    uint16_t length;
-} UartRxMessage_t;
-
-typedef struct __attribute__((packed)){
-    uint8_t data[UART_TX_MSG_MAX_LEN];
-    uint16_t length;
-} UartTxMessage_t;
-
-typedef struct __attribute__((packed)){
-    uint8_t header[2];      // 0xAA, 0x55
-    uint16_t frame_id;       // ֡ID
-    uint8_t data_type;      // ����
-    uint16_t data_length;   // ���ݳ��ȣ����ֽ���ǰ��
-    uint8_t data[FRAME_MAX_DATA_LEN]; // ����
-    uint16_t  checksum;       // У��
-    uint8_t tail[2];        // 0x0D, 0x0A
-} __attribute__((packed)) Frame_t;
-
-typedef enum {
-    DATA_TYPE_NONE         = 0x00,
-    DATA_TYPE_CONFIG       = 0x01,  // ���ò����ṹ��
-    DATA_TYPE_SENSOR_DATA  = 0x02,  // ���������ݽṹ��
-    DATA_TYPE_COMMAND      = 0x03,  // ��������ṹ��
-    DATA_TYPE_RESPONSE     = 0x04,  // Ӧ����Ϣ
-    DATA_TYPE_TEXT         = 0x05,   // �ı���Ϣ
-    DATA_CHANNEL_VALUE          = 0x06,   // ͨ����ϸ��Ϣ
-    DATA_UINT8_T          = 0x07,   // ͨ����ϸ��Ϣ
-    DATA_UINT16_T          = 0x08,   // ͨ����ϸ��Ϣ
-    DATA_FLOAT          = 0x09,   // ͨ����ϸ��Ϣ
-    // ������չ����
-} DataType_t;
-typedef enum {
-    FRAME_ID_CONFIG   = 0x1000,
-    UINT8_T_FAN      = 0x1001,
-    UINT8_T_MIST     = 0x1002,
-    FLOAT_TEMPERATURE   = 0x1003,
-    UINT8_T_MODEL     = 0x1004,
-    UINT8_T_RUNSTATE    = 0x1005,
-    UINT8_T_WATER_LOW     = 0x1006,
-    FRAME_ID_SENSOR   = 0x1010,
-    FRAME_ID_TEXT     = 0x1020,
+typedef enum
+{
+    /** ① 压力设定值（float, 单位 kPa, 范围5~39kPa） */
+    F32_PRESSURE_SET_KPA        = 0x1001,
+    /** ② 左眼温度设定值（float, 单位°C） */
+    F32_LEFT_TEMP_SET_C         = 0x1002,
+    /** ③ 右眼温度设定值（float, 单位°C） */
+    F32_RIGHT_TEMP_SET_C        = 0x1003,
+    /** ④ 左眼压力开关（uint8_t, 0=关闭,1=开启） */
+    U8_LEFT_PRESSURE_ENABLE     = 0x1004,
+    /** ⑤ 右眼压力开关（uint8_t, 0=关闭,1=开启） */
+    U8_RIGHT_PRESSURE_ENABLE    = 0x1005,
+    /** ⑥ 左眼加热开关（uint8_t, 0=关闭,1=开启） */
+    U8_LEFT_TEMP_ENABLE         = 0x1006,
+    /** ⑦ 右眼加热开关（uint8_t, 0=关闭,1=开启） */
+    U8_RIGHT_TEMP_ENABLE        = 0x1007,
+    /** ⑧ 气泵功率设定（uint8_t, 0~255 对应PWM占空比） */
+    U8_PUMP_POWER_VALUE         = 0x1008,
+    /** 调试文本帧（可选） */
+    FRAME_ID_TEXT               = 0x10F0,
+    // ============================================================================
+    // 下位机 → 上位机（实时数据 / 监测反馈）
+    // ============================================================================
+    /** ① 左眼压力反馈（float, 单位kPa） */
+    F32_LEFT_PRESSURE_VALUE     = 0x1101,
+    /** ② 右眼压力反馈（float, 单位kPa） */
+    F32_RIGHT_PRESSURE_VALUE    = 0x1102,
+    /** ③ 左眼温度反馈（float, 单位°C） */
+    F32_LEFT_TEMP_VALUE         = 0x1103,
+    /** ④ 右眼温度反馈（float, 单位°C） */
+    F32_RIGHT_TEMP_VALUE        = 0x1104,
+    /** ⑤ 系统运行状态反馈（uint8_t，可选扩展） */
+    U8_SYSTEM_STATE             = 0x1105,
+    /** ⑥ 设备告警状态反馈（uint8_t，可选扩展） */
+    U8_ALARM_STATE              = 0x1106,
 } FrameId_t;
 
-typedef struct __attribute__((packed)) {
-    uint8_t fan;
-    uint8_t heat;
-    uint8_t mist;
-} ConfigData_t;
 
-typedef struct __attribute__((packed)) {
-    float temperature;
-} ChannelValue_t;
+//处理串口接收到的结构体数据
+void handle_config_data(const uint8_t* data_ptr, uint16_t data_len);
+//处理串口接收到的数据
+uint8_t handle_uint8_t_data(const uint8_t *data_ptr, uint16_t data_len);
+//处理串口接收到的数据
+float handle_float_data(const uint8_t *data_ptr, uint16_t data_len);
 
-typedef struct __attribute__((packed)){
-    uint32_t adc_data;
-} SensorData_t;
+void UartFrame_Dispatch(FrameId_t frame_id,const uint8_t *data_ptr,uint16_t data_len);
 
-typedef struct __attribute__((packed)){
-    uint8_t command_id;
-    uint8_t param;
-} CommandData_t;
-
-typedef struct __attribute__((packed)){
-    uint8_t result;
-    char message[32];
-} ResponseData_t;
-
-
-typedef union {
-    ConfigData_t     config;
-    SensorData_t     sensor;
-    CommandData_t    command;
-    ResponseData_t   response;
-    ChannelValue_t   channel_value;
-    char             text[FRAME_MAX_DATA_LEN];  // ��󶵵�
-} PayloadUnion_t;
-
-void Uart_SendFrame(UartPort_t *port, DataType_t type, uint16_t frame_id, const void *data);
-bool Protocol_ParseByte(uint8_t byte, Frame_t *out_frame);
-uint16_t crc16_modbus(const uint8_t *buf, uint16_t len);
 #endif //ELECTRICAL_MUSCLE_QUBEMX_UART_COMMUNICATE_H
