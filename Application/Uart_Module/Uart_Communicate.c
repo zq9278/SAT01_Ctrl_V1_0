@@ -139,6 +139,9 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
                 HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
                 TIM15->CCR1 = AirPump1PWM;
                 LOG("[UART] 左气压 开启\r\n");
+               
+					AirValve2(1);
+					AirValve1(1);
             }
             else
             {
@@ -169,6 +172,8 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
                 HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
                 TIM15->CCR1 = AirPump1PWM;
                 LOG("[UART] 右气压 开启\r\n");
+                AirValve1(1);
+                AirValve2(1);
             }
             else
             {
