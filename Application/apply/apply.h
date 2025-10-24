@@ -10,6 +10,12 @@
 #define OD 2	//右眼
 #define OS 1	//左眼
 #define OU 3	//双眼
+typedef enum {
+    WORK_IDLE = 0,
+    WORK_INFLATE,
+    WORK_HOLD,
+    WORK_DEFLATE,
+} WorkState_t;
 
 
 uint16_t ModbusCRC16(const uint8_t *data, uint16_t len) ;
@@ -24,5 +30,6 @@ void Work_Expression(u8 eye);
 void Work_Heat(u8 eye);
 u8 Work_DrainWater(void);
 u8 Work_AddWater(void);
+void Work_Init(void);
 #endif
 

@@ -23,6 +23,13 @@ extern volatile u8 AirPump1PWM;
 extern volatile u16 PressureSet;
 extern volatile u16 RightTempSet, LeftTempSet;
 extern PID_TypeDef RightHeat, LeftHeat;
+extern uint32_t holdSeconds ;   // 保压时间（m秒）
+extern uint32_t releaseSeconds;// 泄气时间（m秒）
+extern TimerHandle_t xHoldTimer;
+
+// New protocol states
+static volatile uint8_t s_squeeze_mode = 0; // 0=normal, 1=alternate, 2=sync (user-defined)
+extern UartPort_t rk3576_uart_port;
 
 //澶勭悊涓插彛鎺ユ敹鍒扮殑缁撴瀯浣撴暟鎹?
 void handle_config_data(const uint8_t* data_ptr, uint16_t data_len)
@@ -82,10 +89,22 @@ float handle_float_data(const uint8_t *data_ptr, uint16_t data_len)
  *           bit2 → 左加热功能开启
  *           bit3 → 右加热功能开启
  */
+ extern WorkState_t workState;
 void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t data_len)
 {
     switch (frame_id)
     {
+        // =========================================================================
+        // 000 心跳请求（uint8_t） -> 立即回 0x1100 心跳应答
+        // =========================================================================
+        case U8_HEARTBEAT_REQ:
+        {
+            uint8_t hb = 1;
+            (void)handle_uint8_t_data(data_ptr, data_len); // 允许上位机传值但目前不使用
+            rk3576_uart_port.sender(DATA_UINT8_T, U8_HEARTBEAT_ACK, &hb);
+            LOG("  心跳请求 -> 应答\r\n");
+            break;
+        }
         // =========================================================================
         // ① 压力设定（float, 单位 kPa, 范围 5~39）
         // =========================================================================
@@ -95,7 +114,7 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
             if (press_kpa < 5.0f)  press_kpa = 5.0f;
             if (press_kpa > 39.0f) press_kpa = 39.0f;
             PressureSet = (u16)(press_kpa * 1000.0f);   // 转换为 Pa 存储
-            LOG("[UART] 压力设定 %.2f kPa\r\n", press_kpa);
+            LOG("  压力设定 %.2f kPa\r\n", press_kpa);
             break;
         }
 
@@ -109,7 +128,7 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
             LeftTempSet = (u16)sp;
 
             PID_Init(&LeftHeat, 400, 2, 200, 100000, 0, 1999, 0, LeftTempSet);
-            LOG("[UART] 左眼温度设定 %.2f°C\r\n", lt);
+            LOG("  左眼温度设定 %.2f°C\r\n", lt);
             break;
         }
 
@@ -123,7 +142,43 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
             RightTempSet = (u16)sp;
 
             PID_Init(&RightHeat, 400, 2, 200, 100000, 0, 1999, 0, RightTempSet);
-            LOG("[UART] 右眼温度设定 %.2f°C\r\n", rt);
+            LOG("  右眼温度设定 %.2f°C\r\n", rt);
+            break;
+        }
+        // =========================================================================
+        // ⑩ 泄气时间设定（uint32_t, 单位 ms）
+        // =========================================================================
+        case U32_RELEASE_TIME_MS:
+        {
+            if (data_len >= sizeof(uint32_t))
+            {
+                uint32_t val_ms;
+                memcpy(&val_ms, data_ptr, sizeof(uint32_t));
+                releaseSeconds = val_ms;
+                LOG("  泄气时间设定 %lu ms\r\n", releaseSeconds);
+            }
+            else
+            {
+                LOG("  泄气时间数据长度错误 len=%d\r\n", data_len);
+            }
+            break;
+        }
+        case U32_HOLD_TIME_MS:
+        {
+            if (data_len >= sizeof(uint32_t))
+            {
+                uint32_t val_ms;
+                memcpy(&val_ms, data_ptr, sizeof(uint32_t));
+                holdSeconds = val_ms;
+                LOG("  保压时间设定 %lu ms\r\n", holdSeconds);
+            
+                // ✅ 如果定时器已经创建，立刻应用新的时间
+                if (xHoldTimer != NULL)
+                {
+                    // 改变周期并重启定时器
+                    xTimerChangePeriod(xHoldTimer, pdMS_TO_TICKS(holdSeconds), 0);
+                }
+            }
             break;
         }
 
@@ -133,28 +188,27 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
         case U8_LEFT_PRESSURE_ENABLE:
         {
             uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+             workState = WORK_IDLE;
             if (en)
             {
+                //workState = WORK_IDLE;
                 WorkMode |= 0x01; // 左气压 ON
                 HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
                 TIM15->CCR1 = AirPump1PWM;
-                LOG("[UART] 左气压 开启\r\n");
-               
-					AirValve2(1);
-					AirValve1(1);
+                LOG("  左气压 开启\r\n");
             }
             else
             {
                 WorkMode &= ~0x01; // 左气压 OFF
-                LOG("[UART] 左气压 关闭\r\n");
-
+                LOG("  左气压 关闭\r\n");
+                 AirValve2(0);
                 if ((WorkMode & 0x03) == 0)
                 {
-                    WorkModeState = 0;
+                    //WorkModeState = 0;
                     HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
                     TIM15->CCR1 = 0;
-                    AirValve1(0);
-                    AirValve2(0);
+                     AirValve1(0);
+					
                 }
             }
             break;
@@ -166,27 +220,26 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
         case U8_RIGHT_PRESSURE_ENABLE:
         {
             uint8_t en = handle_uint8_t_data(data_ptr, data_len);
+             workState = WORK_IDLE;
             if (en)
             {
                 WorkMode |= 0x02; // 右气压 ON
+               
                 HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
                 TIM15->CCR1 = AirPump1PWM;
-                LOG("[UART] 右气压 开启\r\n");
-                AirValve1(1);
-                AirValve2(1);
+                LOG("  右气压 开启\r\n");
             }
             else
             {
                 WorkMode &= ~0x02;
-                LOG("[UART] 右气压 关闭\r\n");
-
+                LOG("  右气压 关闭\r\n");
+                AirValve1(0);
                 if ((WorkMode & 0x03) == 0)
                 {
-                    WorkModeState = 0;
+                    // WorkModeState = 0;
                     HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
                     TIM15->CCR1 = 0;
-                    AirValve1(0);
-                    AirValve2(0);
+					AirValve2(0);
                 }
             }
             break;
@@ -203,13 +256,13 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
                 WorkMode |= 0x04;   // 左加热 ON
                 HeatPower(2, 1);
                 HeatPWMSet(2, 0);
-                LOG("[UART] 左加热 开启\r\n");
+                LOG("  左加热 开启\r\n");
             }
             else
             {
                 WorkMode &= ~0x04;  // 左加热 OFF
                 HeatPower(2, 0);
-                LOG("[UART] 左加热 关闭\r\n");
+                LOG("  左加热 关闭\r\n");
             }
             break;
         }
@@ -225,13 +278,13 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
                 WorkMode |= 0x08;   // 右加热 ON
                 HeatPower(1, 1);
                 HeatPWMSet(1, 0);
-                LOG("[UART] 右加热 开启\r\n");
+                LOG("  右加热 开启\r\n");
             }
             else
             {
                 WorkMode &= ~0x08;  // 右加热 OFF
                 HeatPower(1, 0);
-                LOG("[UART] 右加热 关闭\r\n");
+                LOG("  右加热 关闭\r\n");
             }
             break;
         }
@@ -249,7 +302,17 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
                 HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
                 TIM15->CCR1 = AirPump1PWM;
             }
-            LOG("[UART] 气泵功率设定 PWM=%u\r\n", pwm);
+            LOG("  气泵功率设定 PWM=%u\r\n", pwm);
+            break;
+        }
+
+        // =========================================================================
+        // ⑪ 挤压模式设定（uint8_t）
+        // =========================================================================
+        case U8_SQUEEZE_MODE:
+        {
+            s_squeeze_mode = handle_uint8_t_data(data_ptr, data_len);
+            LOG("  挤压模式设定=%u\r\n", s_squeeze_mode);
             break;
         }
 
@@ -264,24 +327,24 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
         //         if (p[0] == 1)
         //         {
         //             WorkMode |= 0x20; // 加水
-        //             LOG("[UART] 加水 启动\r\n");
+        //             LOG("  加水 启动\r\n");
         //         }
         //         else if (p[1] == 1)
         //         {
         //             WorkMode |= 0x10; // 排水
-        //             LOG("[UART] 排水 启动\r\n");
+        //             LOG("  排水 启动\r\n");
         //         }
         //         else if (p[2] == 1)
         //         {
         //             WaterState = StartWaterPump(); // 水泵启
-        //             LOG("[UART] 水泵 启动\r\n");
+        //             LOG("  水泵 启动\r\n");
         //         }
         //     }
         //     else if (p[2] == 0)
         //     {
         //         WaterState = 0;
         //         StopWaterPump(); // 停止水泵
-        //         LOG("[UART] 水泵 停止\r\n");
+        //         LOG("  水泵 停止\r\n");
         //     }
         //     break;
         // }
@@ -295,13 +358,13 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
         //     if (en == 0x00)
         //     {
         //         StopIPLCold();
-        //         LOG("[UART] 冷却模块 停止\r\n");
+        //         LOG("  冷却模块 停止\r\n");
         //     }
         //     else
         //     {
         //         uint8_t power = (data_len > 3) ? data_ptr[3] : 128;
         //         StartIPLCold(power);
-        //         LOG("[UART] 冷却模块 启动, 功率=%u\r\n", power);
+        //         LOG("  冷却模块 启动, 功率=%u\r\n", power);
         //     }
         //     break;
         // }
@@ -310,11 +373,11 @@ void UartFrame_Dispatch(FrameId_t frame_id, const uint8_t *data_ptr, uint16_t da
         // 文本帧 / 未知帧
         // =========================================================================
         case FRAME_ID_TEXT:
-            LOG("[UART] 文本帧接收 len=%d\r\n", data_len);
+            LOG("  文本帧接收 len=%d\r\n", data_len);
             break;
 
         default:
-            LOG("[UART] 未知 frame_id: 0x%04X len=%d\r\n", frame_id, data_len);
+            LOG("  未知 frame_id: 0x%04X len=%d\r\n", frame_id, data_len);
             break;
     }
 }

@@ -55,7 +55,7 @@ void AppMain_FreeRTOS_Init(void)
     debug_uart_port_Init(&debug_uart_port);
     BaseType_t ret;
 // === UART_RX ===
-ret = xTaskCreate(UartRxParserTask, "UART_RX", 256, NULL, 22, NULL);
+ret = xTaskCreate(UartRxParserTask, "UART_RX", 300, NULL, 22, NULL);
 if (ret != pdPASS)
 {
     LOG("[ERR] UART_RX create failed!\r\n");
@@ -158,6 +158,7 @@ static void vTaskWorkMode(void *argument)
     (void)argument;
     u8 timer_100ms = 0, timer_500ms = 0;
     u16 timer_5000ms = 0;
+     Work_Init();
 
     for (;;)
     {

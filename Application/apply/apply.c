@@ -2,6 +2,8 @@
 #include "heat.h"
 #include "water.h"
 #include "Pressure_sensor.h"
+#include "timers.h"
+#include "LOG.h"
 
 
 #define DefultTemperature 3400
@@ -139,85 +141,182 @@ void SendAddWaterState(u8 add_water_state)
 }
 
 
-void Work_Expression(u8 eye)
+
+
+ WorkState_t workState = WORK_IDLE;
+TimerHandle_t xHoldTimer = NULL;      // 保压定时器
+ TimerHandle_t xReleaseTimer = NULL;   // 泄气定时器
+ uint8_t currentEye = OD;
+uint32_t holdSeconds   = 1000;  // 保压时间（m秒）
+uint32_t releaseSeconds = 500; // 泄气时间（m秒）
+
+static void vHoldTimerCallback(TimerHandle_t xTimer)
 {
-	if(eye==OD)//右眼
-	{
-		switch(WorkModeState)
-		{
-			case 0:
-				if(right_pressure<=Pressure_Deflation)
-				{
-					
-					AirValve1(0);
-					TIM15->CCR1=AirPump1PWM;
-					WorkModeState=1;
-				}
-				break;
-			case 1://?????????????????��?
-				if(right_pressure>=PressureSet)
-				{
-					AirValve1(1);
-					TIM15->CCR1=0;
-					WorkModeState=0;
-				}
-			default:
-				break;
-		}
-		
-	}
-	else if(eye==OS)//左眼
-	{
-		switch(WorkModeState)
-		{
-			case 0:
-				if(left_pressure<=Pressure_Deflation)
-				{
-					AirValve2(0);
-					TIM15->CCR1=AirPump1PWM;
-					WorkModeState=1;
-				}
-				break;
-			case 1://?????????????????��?
-				if(left_pressure>=PressureSet)
-				{
-					AirValve2(1);//泄气
-					TIM15->CCR1=0;
-					WorkModeState=0;
-				}
-			default:
-				break;
-		}
-		
-	}
-	else if(eye==OU)
-	{
-		switch(WorkModeState)
-		{
-			
-			case 0:
-				if((right_pressure<=Pressure_Deflation)||(left_pressure<=Pressure_Deflation))
-				{
-					AirValve1(0);
-					AirValve2(0);
-					TIM15->CCR1=AirPump1PWM;
-					WorkModeState=1;
-				}
-				break;
-			case 1://?????????????????��?
-				if((right_pressure>=PressureSet)||(left_pressure>=PressureSet))
-				{
-					AirValve1(1);
-					AirValve2(1);
-					TIM15->CCR1=0;
-					WorkModeState=0;
-				}
-			default:
-				break;
-		}
-		
-	}
+    (void)xTimer;
+    //LOG("[HoldTimer] 保压阶段结束，开始泄气。\r\n");
+
+    switch (currentEye)
+    {
+        case OD:
+            AirValve1(1);
+            break;
+        case OS:
+            AirValve2(1);
+            break;
+        case OU:
+            AirValve1(1);
+            AirValve2(1);
+            break;
+    }
+
+    TIM15->CCR1 = 0;  // 停止气泵
+    workState = WORK_DEFLATE;
+    //LOG("[HoldTimer] 切换状态 -> WORK_DEFLATE\r\n");
+
+    // 启动“泄气时间”定时器
+    //LOG("[HoldTimer] 启动 ReleaseTimer，时长 %d 秒\r\n", releaseSeconds);
+    xTimerChangePeriod(xReleaseTimer, pdMS_TO_TICKS(releaseSeconds), 0);
+    xTimerStart(xReleaseTimer, 0);
 }
+
+// ==========================================================
+// 泄气阶段结束 → 重新进入充气阶段
+// ==========================================================
+static void vReleaseTimerCallback(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    //LOG("[ReleaseTimer] 泄气阶段结束，关闭阀门，准备再次充气。\r\n");
+  switch (currentEye)
+    {
+        case OD:
+            AirValve1(0);
+            break;
+        case OS:
+             AirValve2(0);
+            break;
+        case OU:
+            AirValve1(0);
+    		AirValve2(0);
+            break;
+    }
+    
+
+    workState = WORK_INFLATE;
+    //LOG("[ReleaseTimer] 切换状态 -> WORK_INFLATE\r\n");
+}
+
+// ==========================================================
+// 初始化函数：创建两个一次性软件定时器
+// ==========================================================
+void Work_Init(void)
+{
+    //LOG("[Work_Init] 初始化工作状态机与定时器。\r\n");
+
+    if (xHoldTimer == NULL)
+    {
+        xHoldTimer = xTimerCreate("HoldTimer",
+                                  pdMS_TO_TICKS(holdSeconds),
+                                  pdFALSE,
+                                  NULL,
+                                  vHoldTimerCallback);
+        //LOG("[Work_Init] 创建 HoldTimer, 周期 = %d 秒。\r\n", holdSeconds);
+    }
+
+    if (xReleaseTimer == NULL)
+    {
+        xReleaseTimer = xTimerCreate("ReleaseTimer",
+                                     pdMS_TO_TICKS(releaseSeconds),
+                                     pdFALSE,
+                                     NULL,
+                                     vReleaseTimerCallback);
+        //LOG("[Work_Init] 创建 ReleaseTimer, 周期 = %d 秒。\r\n", releaseSeconds);
+    }
+
+    workState = WORK_IDLE;
+    //LOG("[Work_Init] 初始状态 -> WORK_IDLE\r\n");
+}
+
+// ==========================================================
+// 主控制函数（在任务循环中周期执行）
+// ==========================================================
+void Work_Expression(uint8_t eye)
+{
+    currentEye = eye;  // 记录当前操作的眼（右/左/双）
+    //LOG("[Work_Expression] 当前工作状态: %d, Eye = %d\r\n", workState, currentEye);
+
+    switch (workState)
+    {
+        // ---------- 初始阶段 ----------
+        case WORK_IDLE:
+            AirValve1(1);//先泄气
+            AirValve2(1);
+            TIM15->CCR1 = 0;
+            workState = WORK_INFLATE;
+            break;
+
+        // ---------- 充气阶段 ----------
+        case WORK_INFLATE:
+            switch (eye)
+            {
+                case OD://右眼
+                    if (right_pressure <= Pressure_Deflation) {//充气阶段，右关
+                        AirValve1(0);
+                        AirValve2(1);
+                        TIM15->CCR1 = AirPump1PWM;
+                    }
+                    if (right_pressure >= PressureSet) {
+                        TIM15->CCR1 = 0;
+                        xTimerStart(xHoldTimer, 0);
+                        workState = WORK_HOLD;
+                    }
+                    break;
+
+                case OS:
+                    if (left_pressure <= Pressure_Deflation) {
+                        AirValve2(0);
+                        AirValve1(1);
+                        TIM15->CCR1 = AirPump1PWM;
+                    }
+                    if (left_pressure >= PressureSet) {
+                        TIM15->CCR1 = 0;
+                        xTimerStart(xHoldTimer, 0);
+                        workState = WORK_HOLD;
+                    }
+                    break;
+
+                case OU:
+                    if (right_pressure <= Pressure_Deflation && left_pressure <= Pressure_Deflation) {
+                        AirValve1(0);
+                        AirValve2(0);
+                        TIM15->CCR1 = AirPump1PWM;
+                    }
+                    if (right_pressure >= PressureSet && left_pressure >= PressureSet) {
+                        TIM15->CCR1 = 0;
+                        xTimerStart(xHoldTimer, 0);
+                        workState = WORK_HOLD;
+                    }
+                    break;
+            }
+            break;
+
+        // ---------- 保压阶段 ----------
+        case WORK_HOLD:
+            //LOG("[WORK_HOLD] 保压中，等待定时器触发泄气。\r\n");
+            break;
+
+        // ---------- 泄气阶段 ----------
+        case WORK_DEFLATE:
+            //LOG("[WORK_DEFLATE] 泄气中，等待 ReleaseTimer 触发。\r\n");
+            break;
+
+        default:
+            //LOG("[Work_Expression] 未知状态：%d\r\n", workState);
+            break;
+    }
+}
+
+
+
 
 
 void Work_Heat(u8 eye)

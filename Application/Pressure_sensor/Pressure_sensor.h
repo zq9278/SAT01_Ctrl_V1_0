@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 #define Pressure_sensorAdd	0x78
-#define Pressure_Deflation  1000
+#define Pressure_Deflation  50
 
 void pressure_sensor_read(void);
 #endif

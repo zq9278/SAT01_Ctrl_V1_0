@@ -7,5 +7,10 @@
         "Ninja"
     ],
     "stm32cube-ide-clangd.path": "cube",
-    "files.encoding": "utf8"
+    "files.encoding": "utf8",
+    "stm32cube-ide-clangd.arguments": [
+        "starm-clangd",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/13.3.1+st.9/bin/arm-none-eabi-gcc.exe",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/13.3.1+st.9/bin/arm-none-eabi-g++.exe"
+    ]
 }
